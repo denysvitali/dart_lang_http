@@ -10,6 +10,7 @@ import 'package:jni/jni.dart';
 import 'package:web_socket/web_socket.dart';
 
 import 'jni/bindings.dart' as bindings;
+import 'ok_http_client.dart';
 
 extension on List<int> {
   JByteArray toJByteArray() => JByteArray(length)..setRange(0, length, this);
@@ -46,6 +47,46 @@ extension on List<int> {
 /// }
 /// ```
 ///
+/// Example usage with custom configuration:
+/// ```dart
+/// import 'package:ok_http/ok_http.dart';
+/// import 'package:web_socket/web_socket.dart';
+///
+/// void main() async {
+///   final configuration = OkHttpClientConfiguration(
+///     connectTimeout: Duration(seconds: 30),
+///     readTimeout: Duration(seconds: 30),
+///   );
+///
+///   final socket = await OkHttpWebSocket.connect(
+///       Uri.parse('wss://ws.postman-echo.com/raw'),
+///       configuration: configuration);
+///
+///   // Handle events...
+/// }
+/// ```
+///
+/// Example usage with custom OkHttpClient:
+/// ```dart
+/// import 'package:ok_http/ok_http.dart';
+/// import 'package:web_socket/web_socket.dart';
+///
+/// void main() async {
+///   final httpClient = OkHttpClient(
+///     configuration: OkHttpClientConfiguration(
+///       connectTimeout: Duration(seconds: 30),
+///       readTimeout: Duration(seconds: 30),
+///     ),
+///   );
+///
+///   final socket = await OkHttpWebSocket.connect(
+///       Uri.parse('wss://ws.postman-echo.com/raw'),
+///       client: httpClient);
+///
+///   // Handle events...
+/// }
+/// ```
+///
 /// > [!TIP]
 /// > [`AdapterWebSocketChannel`](https://pub.dev/documentation/web_socket_channel/latest/adapter_web_socket_channel/AdapterWebSocketChannel-class.html)
 /// > can be used to adapt a [OkHttpWebSocket] into a
@@ -55,17 +96,20 @@ class OkHttpWebSocket implements WebSocket {
   late final bindings.WebSocket _webSocket;
   final _events = StreamController<WebSocketEvent>();
   String? _protocol;
+  final bool _ownsClient;
 
   /// Private constructor to prevent direct instantiation.
   ///
   /// Used by [connect] to create a new WebSocket connection, which requires a
   /// [bindings.OkHttpClient] instance (see [_connect]), and cannot be accessed
   /// statically.
-  OkHttpWebSocket._() {
+  OkHttpWebSocket._({bindings.OkHttpClient? client, bool ownsClient = true})
+      : _ownsClient = ownsClient {
     // Add the WebSocketInterceptor to prevent response parsing errors.
-    _client = bindings.WebSocketInterceptor.Companion
-        .addWSInterceptor(bindings.OkHttpClient$Builder())
-        .build();
+    _client = client ??
+        bindings.WebSocketInterceptor.Companion
+            .addWSInterceptor(bindings.OkHttpClient$Builder())
+            .build();
   }
 
   /// Create a new WebSocket connection using `OkHttp`'s
@@ -77,9 +121,53 @@ class OkHttpWebSocket implements WebSocket {
   /// If provided, the [protocols] argument indicates the subprotocols that
   /// the peer is able to select. See
   /// [RFC-6455 1.9](https://datatracker.ietf.org/doc/html/rfc6455#section-1.9).
-  static Future<WebSocket> connect(Uri url,
-          {Iterable<dynamic>? protocols}) async =>
-      OkHttpWebSocket._()._connect(url, protocols);
+  ///
+  /// Optionally provide a [client] to use a specific [OkHttpClient] instance.
+  /// If no client is provided, a new one will be created using the
+  /// [configuration].
+  ///
+  /// The [configuration] is used to customize the OkHttpClient behavior when
+  /// no [client] is provided. If both [client] and [configuration] are
+  /// provided, the [configuration] is ignored.
+  static Future<WebSocket> connect(
+    Uri url, {
+    Iterable<dynamic>? protocols,
+    OkHttpClient? client,
+    OkHttpClientConfiguration? configuration,
+  }) async {
+    final (underlyingClient, ownsClient) = _createClient(client, configuration);
+    return OkHttpWebSocket._(
+      client: underlyingClient,
+      ownsClient: ownsClient,
+    )._connect(url, protocols);
+  }
+
+  /// Creates the appropriate OkHttp client based on the provided parameters.
+  /// 
+  /// Returns a tuple of (underlyingClient, ownsClient) where:
+  /// - underlyingClient: The bindings.OkHttpClient to use
+  /// - ownsClient: Whether this WebSocket instance should own and close the
+  ///   client
+  static (bindings.OkHttpClient?, bool) _createClient(
+    OkHttpClient? client,
+    OkHttpClientConfiguration? configuration,
+  ) {
+    // If both client and configuration are provided, use the client and ignore
+    // configuration
+    if (client != null) {
+      return (client.underlyingClient, false);
+    }
+    
+    // If only configuration is provided, create a new client with it
+    if (configuration != null) {
+      final httpClient = OkHttpClient(configuration: configuration);
+      return (httpClient.underlyingClient, true);
+    }
+    
+    // Neither provided, use default behavior (client will be created in
+    // constructor)
+    return (null, true);
+  }
 
   Future<WebSocket> _connect(Uri url, Iterable<dynamic>? protocols) async {
     if (!url.isScheme('ws') && !url.isScheme('wss')) {
@@ -217,14 +305,20 @@ class OkHttpWebSocket implements WebSocket {
 
   /// Closes the OkHttpClient using the recommended shutdown procedure.
   ///
+  /// Only closes the client if this WebSocket instance owns it.
+  /// If a custom client was provided, the client is not closed here
+  /// since that's the responsibility of the client owner.
+  ///
   /// https://square.github.io/okhttp/5.x/okhttp/okhttp3/-ok-http-client/index.html#:~:text=Shutdown
   void _okHttpClientClose() {
-    _client.dispatcher().executorService().shutdown();
-    _client.connectionPool().evictAll();
-    var cache = _client.cache();
-    if (cache != null) {
-      cache.close();
+    if (_ownsClient) {
+      _client.dispatcher().executorService().shutdown();
+      _client.connectionPool().evictAll();
+      var cache = _client.cache();
+      if (cache != null) {
+        cache.close();
+      }
+      _client.release();
     }
-    _client.release();
   }
 }

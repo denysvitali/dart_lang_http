@@ -224,6 +224,11 @@ class OkHttpClient extends BaseClient {
   /// It can be updated multiple times during the client's lifecycle.
   OkHttpClientConfiguration configuration;
 
+  /// Provides access to the underlying OkHttp client instance.
+  /// This is primarily used by WebSocket implementations to create WebSocket
+  /// connections.
+  bindings.OkHttpClient get underlyingClient => _client;
+
   /// Creates a new instance of [OkHttpClient] with the given [configuration].
   OkHttpClient({
     this.configuration = const OkHttpClientConfiguration(),
